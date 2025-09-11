@@ -25,7 +25,19 @@ def reverse_lookup(ip: str) -> tuple[str, str]:
 def ip_key(addr: str):
     return [int(x) for x in addr.split(".")]
 
+def load_csv(file_path: str) -> list[list[str]]:
+    if not os.path.exists(file_path):
+        return []
+    with open(file_path, "r", encoding="utf-8-sig") as f:
+        return [row for row in csv.reader(f) if row]
+
+def save_csv(file_path: str, rows: list[list[str]]):
+    with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
 def main():
+    # lấy danh sách IP từ pass.csv
     ips = []
     if os.path.exists(PASS_FILE):
         with open(PASS_FILE, "r", encoding="utf-8-sig") as f:
@@ -50,31 +62,31 @@ def main():
                 removed_ips.append(ip)
                 print(f"{ip:15} -> N/A  (bỏ)")
 
-    # Sắp xếp
-    results.sort(key=lambda x: ip_key(x[0]))
-    kept_ips = [ip for ip, _ in results]
-    removed_ips.sort(key=ip_key)
+    # load dữ liệu cũ
+    old_domain = load_csv(OUTPUT_FILE)
+    old_pass = load_csv(PASS_FILE)
+    old_removed = load_csv(NA_FILE)
 
-    # Xuất file domain.csv
-    with open(OUTPUT_FILE, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        for ip, domain in results:
-            writer.writerow([ip, domain])
+    # cập nhật dữ liệu mới
+    all_domain = {(row[0], row[1]) for row in old_domain if len(row) >= 2}
+    all_domain.update(results)
 
-    # Ghi đè lại pass.csv
-    with open(PASS_FILE, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        for ip in kept_ips:
-            writer.writerow([ip])
+    kept_ips = {row[0] for row in all_domain}
+    removed_set = {row[0] for row in old_removed}
+    removed_set.update(removed_ips)
 
-    # Lưu domain_removed.csv
-    with open(NA_FILE, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        for ip in removed_ips:
-            writer.writerow([ip])
+    # sort lại
+    all_domain = sorted(list(all_domain), key=lambda x: ip_key(x[0]))
+    kept_ips = sorted(list(kept_ips), key=ip_key)
+    removed_ips = sorted(list(removed_set), key=ip_key)
 
-    print(f"\n✅ Đã lưu file: {OUTPUT_FILE}")
-    print(f"✅ pass.csv đã được lọc, còn lại {len(kept_ips)} IP có domain")
+    # lưu file
+    save_csv(OUTPUT_FILE, [[ip, domain] for ip, domain in all_domain])
+    save_csv(PASS_FILE, [[ip] for ip in kept_ips])
+    save_csv(NA_FILE, [[ip] for ip in removed_ips])
+
+    print(f"\n✅ Đã append vào: {OUTPUT_FILE}")
+    print(f"✅ pass.csv đã cập nhật, còn lại {len(kept_ips)} IP có domain")
     print(f"✅ domain_removed.csv đã lưu {len(removed_ips)} IP bị loại")
 
 if __name__ == "__main__":
