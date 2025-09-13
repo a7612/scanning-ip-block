@@ -1,93 +1,92 @@
-import csv
-import os
-import socket
+#!/usr/bin/env python3
+"""
+reverse_lookup.py
+- Đọc storage/pass.csv
+- Reverse DNS lookup:
+  + Thành công -> append lookup_domain_pass.csv
+  + Thất bại   -> append lookup_domain_failed.csv + xóa IP khỏi pass.csv
+"""
+
+import csv, socket, os, argparse, shutil, tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
-os.makedirs("storage", exist_ok=True)
+DEFAULT_IN = "storage/pass.csv"
+PASS_HEADER = ["ip", "timestamp_utc"]
+PASS_OUT_PASS = "storage/lookup_domain_pass.csv"
+PASS_OUT_FAIL = "storage/lookup_domain_failed.csv"
 
-PASS_FILE = "storage\\pass.csv"
-OUTPUT_FILE = "storage\\domain.csv"
-NA_FILE = "storage\\domain_removed.csv"
+def _now_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-MAX_WORKERS = 50 
+def read_pass(path):
+    if not os.path.isfile(path): return []
+    with open(path, newline="", encoding="utf-8") as f:
+        return [r for r in csv.DictReader(f) if r.get("ip")]
 
-def valid_ip(ip: str) -> bool:
-    parts = ip.split(".")
-    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+def append_csv(path, rows, header):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new = not os.path.isfile(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new: w.writerow(header)
+        w.writerows(rows)
 
-def reverse_lookup(ip: str) -> tuple[str, str]:
-    """Trả về (ip, domain hoặc N/A)"""
+def reverse_lookup(ip, timeout=5):
     try:
-        return ip, socket.gethostbyaddr(ip)[0]
-    except Exception:
-        return ip, "N/A"
+        socket.setdefaulttimeout(timeout)
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name.rstrip(".") if name else None
+    except Exception: return None
 
-def ip_key(addr: str):
-    return [int(x) for x in addr.split(".")]
+def process(rows, workers=20, timeout=5):
+    passed, failed = [], []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(reverse_lookup, r["ip"], timeout): r for r in rows}
+        for fut in as_completed(futs):
+            r, ip = futs[fut], futs[fut]["ip"]
+            dom = fut.result()
+            if dom:
+                passed.append([ip, dom, r.get("timestamp_utc", ""), _now_utc()])
+                print(f"[+] {ip} -> {dom}")
+            else:
+                failed.append([ip, r.get("timestamp_utc", ""), _now_utc()])
+                print(f"[-] {ip} -> n/a")
+    return passed, failed
 
-def load_csv(file_path: str) -> list[list[str]]:
-    if not os.path.exists(file_path):
-        return []
-    with open(file_path, "r", encoding="utf-8-sig") as f:
-        return [row for row in csv.reader(f) if row]
-
-def save_csv(file_path: str, rows: list[list[str]]):
-    with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
+def write_pass(path, rows):
+    tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+    os.close(tmp_fd)
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(PASS_HEADER); w.writerows(rows)
+    shutil.move(tmp, path)
 
 def main():
-    # lấy danh sách IP từ pass.csv
-    ips = []
-    if os.path.exists(PASS_FILE):
-        with open(PASS_FILE, "r", encoding="utf-8-sig") as f:
-            for row in csv.reader(f):
-                if row and valid_ip(row[0].strip()):
-                    ips.append(row[0].strip())
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-i", "--infile", default=DEFAULT_IN)
+    ap.add_argument("-w", "--workers", type=int, default=30)
+    ap.add_argument("-t", "--timeout", type=int, default=5)
+    a = ap.parse_args()
 
-    results = []
-    removed_ips = []
+    rows = read_pass(a.infile)
+    if not rows: return print("No IPs found.")
 
-    print(f"🔎 Đang tra cứu {len(ips)} IP bằng {MAX_WORKERS} luồng...")
+    shutil.copy2(a.infile, a.infile + ".bak")
+    print(f"Backup -> {a.infile}.bak")
 
-    # chạy đa luồng
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(reverse_lookup, ip): ip for ip in ips}
-        for future in as_completed(futures):
-            ip, domain = future.result()
-            if domain != "N/A":
-                results.append((ip, domain))
-                print(f"{ip:15} -> {domain}")
-            else:
-                removed_ips.append(ip)
-                print(f"{ip:15} -> N/A  (bỏ)")
+    print(f"Lookup {len(rows)} IPs with {a.workers} workers ...")
+    passed, failed = process(rows, a.workers, a.timeout)
 
-    # load dữ liệu cũ
-    old_domain = load_csv(OUTPUT_FILE)
-    old_pass = load_csv(PASS_FILE)
-    old_removed = load_csv(NA_FILE)
+    if passed:
+        append_csv(PASS_OUT_PASS, passed, ["ip","domain","timestamp_utc","checked_at_utc"])
+        print(f"Saved {len(passed)} -> {PASS_OUT_PASS}")
+    if failed:
+        append_csv(PASS_OUT_FAIL, failed, ["ip","timestamp_utc","checked_at_utc"])
+        print(f"Saved {len(failed)} -> {PASS_OUT_FAIL}")
+        write_pass(a.infile, [[p[0], p[2]] for p in passed])
+        print(f"Removed {len(failed)} IPs from {a.infile}")
 
-    # cập nhật dữ liệu mới
-    all_domain = {(row[0], row[1]) for row in old_domain if len(row) >= 2}
-    all_domain.update(results)
-
-    kept_ips = {row[0] for row in all_domain}
-    removed_set = {row[0] for row in old_removed}
-    removed_set.update(removed_ips)
-
-    # sort lại
-    all_domain = sorted(list(all_domain), key=lambda x: ip_key(x[0]))
-    kept_ips = sorted(list(kept_ips), key=ip_key)
-    removed_ips = sorted(list(removed_set), key=ip_key)
-
-    # lưu file
-    save_csv(OUTPUT_FILE, [[ip, domain] for ip, domain in all_domain])
-    save_csv(PASS_FILE, [[ip] for ip in kept_ips])
-    save_csv(NA_FILE, [[ip] for ip in removed_ips])
-
-    print(f"\n✅ Đã append vào: {OUTPUT_FILE}")
-    print(f"✅ pass.csv đã cập nhật, còn lại {len(kept_ips)} IP có domain")
-    print(f"✅ domain_removed.csv đã lưu {len(removed_ips)} IP bị loại")
+    print("Done.")
 
 if __name__ == "__main__":
     main()
