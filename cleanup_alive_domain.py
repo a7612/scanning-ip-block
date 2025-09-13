@@ -3,6 +3,7 @@
 cleanup_alive_domain.py
 - Đọc storage/lookup_domain_pass.csv
 - Giữ lại domain alive (HTTP/HTTPS), xóa domain dead
+- Xóa duplicate (ưu tiên domain, fallback ip)
 - Tạo backup .bak trước khi ghi đè
 """
 
@@ -51,6 +52,14 @@ def write_csv(path, rows, headers):
         w=csv.DictWriter(f,fieldnames=headers); w.writeheader(); w.writerows(rows)
     shutil.move(tmp,path)
 
+def dedup(rows):
+    seen=set(); uniq=[]
+    for r in rows:
+        key=r.get("domain") or r.get("ip")
+        if key and key not in seen:
+            seen.add(key); uniq.append(r)
+    return uniq
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("-i","--infile",default=DEFAULT_IN)
@@ -71,7 +80,8 @@ def main():
             print(f"[{now()}] {t:<30} {'ALIVE' if ok else 'DEAD'}")
             if ok: alive_rows.append(r)
 
+    alive_rows=dedup(alive_rows)
     write_csv(a.infile,alive_rows,headers)
-    print(f"[{now()}] Done. Alive kept: {len(alive_rows)}/{len(rows)}")
+    print(f"[{now()}] Done. Alive kept (dedup): {len(alive_rows)}/{len(rows)}")
 
 if __name__=="__main__": main()

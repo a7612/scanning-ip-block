@@ -5,6 +5,7 @@ reverse_lookup.py
 - Reverse DNS lookup:
   + Thành công -> append lookup_domain_pass.csv
   + Thất bại   -> append lookup_domain_failed.csv + xóa IP khỏi pass.csv
+- Lọc duplicate theo IP trước khi xử lý
 """
 
 import csv, socket, os, argparse, shutil, tempfile
@@ -22,7 +23,14 @@ def _now_utc():
 def read_pass(path):
     if not os.path.isfile(path): return []
     with open(path, newline="", encoding="utf-8") as f:
-        return [r for r in csv.DictReader(f) if r.get("ip")]
+        rows = [r for r in csv.DictReader(f) if r.get("ip")]
+    # lọc duplicate theo ip
+    seen, uniq = set(), []
+    for r in rows:
+        ip = r["ip"].strip()
+        if ip and ip not in seen:
+            seen.add(ip); uniq.append(r)
+    return uniq
 
 def append_csv(path, rows, header):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -37,7 +45,8 @@ def reverse_lookup(ip, timeout=5):
         socket.setdefaulttimeout(timeout)
         name, _, _ = socket.gethostbyaddr(ip)
         return name.rstrip(".") if name else None
-    except Exception: return None
+    except Exception: 
+        return None
 
 def process(rows, workers=20, timeout=5):
     passed, failed = [], []
@@ -74,7 +83,7 @@ def main():
     shutil.copy2(a.infile, a.infile + ".bak")
     print(f"Backup -> {a.infile}.bak")
 
-    print(f"Lookup {len(rows)} IPs with {a.workers} workers ...")
+    print(f"Lookup {len(rows)} IP(s) with {a.workers} workers ...")
     passed, failed = process(rows, a.workers, a.timeout)
 
     if passed:
@@ -84,7 +93,7 @@ def main():
         append_csv(PASS_OUT_FAIL, failed, ["ip","timestamp_utc","checked_at_utc"])
         print(f"Saved {len(failed)} -> {PASS_OUT_FAIL}")
         write_pass(a.infile, [[p[0], p[2]] for p in passed])
-        print(f"Removed {len(failed)} IPs from {a.infile}")
+        print(f"Removed {len(failed)} IP(s) from {a.infile}")
 
     print("Done.")
 
